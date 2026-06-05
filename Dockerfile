@@ -1,36 +1,42 @@
-# Start with a base image containing Go runtime
-FROM --platform=$BUILDPLATFORM golang:1.25.0 AS builder
+# Build stage
+FROM rust:1.85-bookworm AS builder
 
-ARG TARGETOS
-ARG TARGETARCH
-
-# Set the working directory inside the container
 WORKDIR /app
 
-# Copy the go mod and sum files
-COPY go.mod go.sum ./
+# Install BoringSSL build dependencies
+RUN apt-get update && apt-get install -y build-essential cmake perl pkg-config libclang-dev musl-tools git -y
 
-# Download dependencies
-ENV GOPROXY=https://goproxy.cn,direct
-RUN go mod download
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
 
-# Copy the rest of the application's source code
-COPY . .
+# Create a dummy main.rs to cache dependencies
+RUN mkdir src && echo "fn main() {}" > src/main.rs
 
-# Build the Go app ensuring that the binary is statically linked
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /app/chat2api ./cmd
+# Build dependencies only (cached layer)
+RUN cargo build --release 2>/dev/null || true
 
-# Now use a smaller image to run the app
-FROM alpine:latest
+# Copy the real source code
+COPY src/ src/
 
-# Set the working directory in the new container
+# Touch main.rs to force rebuild
+RUN touch src/main.rs
+
+# Build the application
+RUN cargo build --release
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+# Install runtime dependencies for BoringSSL
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copy the statically-linked binary into the new container
-COPY --from=builder /app/chat2api /app/chat2api
+# Copy the binary
+COPY --from=builder /app/target/release/chat2api /app/chat2api
 
-# This container exposes port 3040 to the outside world
+# Expose port
 EXPOSE 3040
 
-# Run the binary.
-CMD [ "/app/chat2api" ]
+# Run the binary
+CMD ["/app/chat2api"]

@@ -187,3 +187,8 @@ conf/**
 !/conf/app.demo.yaml
 chatgpt2api/**
 
+
+
+# Added by cargo
+
+/target

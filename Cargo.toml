@@ -1,0 +1,30 @@
+[package]
+name = "chat2api"
+version = "0.1.0"
+edition = "2021"
+description = "Convert ChatGPT Web capabilities into OpenAI-compatible HTTP API"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+wreq = { version = "6.0.0-rc" }
+wreq-util = { version = "3.0.0-rc" }
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+uuid = { version = "1", features = ["v4"] }
+sha3 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
+regex = "1"
+chrono = "0.4"
+notify = { version = "7", features = ["macos_kqueue"] }
+futures = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
