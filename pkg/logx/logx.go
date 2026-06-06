@@ -1,9 +1,15 @@
 package logx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/sirupsen/logrus"
 )
@@ -22,6 +28,110 @@ func SetLevel(level Level) {
 
 func SetFormatter(format logrus.Formatter) {
 	logrus.SetFormatter(format)
+}
+
+var (
+	outputMu   sync.Mutex
+	outputFile *os.File
+)
+
+func Configure(levelText string, logPath string, logFile string) error {
+	levelText = strings.TrimSpace(strings.ToLower(levelText))
+	if levelText == "" {
+		levelText = "debug"
+	}
+	level, err := logrus.ParseLevel(levelText)
+	if err != nil {
+		return fmt.Errorf("parse log level %q: %w", levelText, err)
+	}
+	logrus.SetLevel(level)
+	return SetFileOutput(logPath, logFile)
+}
+
+func SetFileOutput(logPath string, logFile string) error {
+	outputMu.Lock()
+	defer outputMu.Unlock()
+
+	var nextFile *os.File
+	logFile = strings.TrimSpace(logFile)
+	if logFile != "" {
+		path := logFile
+		if !filepath.IsAbs(path) {
+			logPath = strings.TrimSpace(logPath)
+			if logPath == "" {
+				logPath = "logs"
+			}
+			path = filepath.Join(logPath, logFile)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return err
+		}
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			return err
+		}
+		nextFile = file
+	}
+
+	if nextFile == nil {
+		logrus.SetOutput(stripANSIWriter{w: os.Stdout})
+	} else {
+		logrus.SetOutput(stripANSIWriter{w: io.MultiWriter(os.Stdout, nextFile)})
+	}
+	if outputFile != nil {
+		_ = outputFile.Close()
+	}
+	outputFile = nextFile
+	return nil
+}
+
+func CloseOutput() {
+	outputMu.Lock()
+	defer outputMu.Unlock()
+	logrus.SetOutput(stripANSIWriter{w: os.Stdout})
+	if outputFile != nil {
+		_ = outputFile.Close()
+		outputFile = nil
+	}
+}
+
+func init() {
+	logrus.SetOutput(stripANSIWriter{w: os.Stdout})
+}
+
+type stripANSIWriter struct {
+	w io.Writer
+}
+
+func (s stripANSIWriter) Write(p []byte) (int, error) {
+	cleaned := stripANSI(p)
+	_, err := s.w.Write(cleaned)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func stripANSI(in []byte) []byte {
+	if !bytes.Contains(in, []byte{27, '['}) {
+		return in
+	}
+	out := make([]byte, 0, len(in))
+	for i := 0; i < len(in); i++ {
+		if in[i] == 27 && i+1 < len(in) && in[i+1] == '[' {
+			i += 2
+			for i < len(in) {
+				b := in[i]
+				if b >= 0x40 && b <= 0x7e {
+					break
+				}
+				i++
+			}
+			continue
+		}
+		out = append(out, in[i])
+	}
+	return out
 }
 
 func AddHook(hook Hook) {

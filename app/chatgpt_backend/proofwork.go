@@ -1,4 +1,4 @@
-package proof_work
+package chatgpt_backend
 
 import (
 	"bytes"

@@ -29,15 +29,16 @@ const defaultHTTPShutdownTimeout = 10 * time.Second
 
 func Init(ctx context.Context) func(ctx context.Context) {
 	runtime.Engine = NewEngine()
+	appConf := conf.GetApp()
 
 	runtime.Server = &http.Server{
-		Addr:    fmt.Sprintf("%v:%v", conf.App.Bind, conf.App.Port),
+		Addr:    fmt.Sprintf("%v:%v", appConf.Bind, appConf.Port),
 		Handler: runtime.Engine,
 	}
 
 	go func() {
 		// 启动日志只记录绑定地址，不输出敏感配置，便于运维快速确认监听端口。
-		logx.WithContext(ctx).Infof("httpServer started on http://%v:%v", conf.App.Bind, conf.App.Port)
+		logx.WithContext(ctx).Infof("httpServer started on http://%v:%v", appConf.Bind, appConf.Port)
 		// ListenAndServe 为阻塞调用，放入协程避免卡住主线程信号监听流程。
 		err := runtime.Server.ListenAndServe()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -89,6 +90,8 @@ func NewEngine() *gin.Engine {
 
 	// Register routes
 	engine.GET("/", Index)
+	engine.GET("/favicon.ico", Favicon)
+	engine.GET("/favicon.png", Favicon)
 	engine.GET("/ping", Ping)
 	v1Router := engine.Group("/v1")
 	v1Router.Use(middleware.V1Cors)
@@ -115,6 +118,10 @@ func Ping(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"message": "pong",
 	})
+}
+
+func Favicon(c *gin.Context) {
+	c.Status(http.StatusNoContent)
 }
 
 // Index 首页

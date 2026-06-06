@@ -1,5 +1,7 @@
 # chat2api
 
+秽土转生 `free-gpt3.5-2api` -> `chat2api`.
+
 把 ChatGPT Web 侧能力转换为兼容 OpenAI 风格的 HTTP API。
 
 ## 支持能力
@@ -10,7 +12,7 @@
 - 本地 `sk-` auth key：使用配置文件中的 `chatgpts` 账号池请求上游。
 - 直传 `at-` access token：使用 `Authorization: Bearer at-<real_access_token>`，跳过账号池，直接用 `at-` 后面的真实 access token 请求上游。
 
-说明：当前 Go 版本不再做模型映射，`model` 会直接传给上游；请求中未传 `model` 时默认使用 `auto`。
+说明：当前版本不再做模型映射，`model` 会直接传给上游；请求中未传 `model` 时默认使用 `auto`。
 
 ## 配置
 
@@ -86,6 +88,17 @@ Docker Compose：
 ```bash
 docker compose up -d
 ```
+
+Vercel 运行时不会写入配置文件，也不会默认读取仓库里的 `conf/app.dev.yaml`，避免把本地代理或本地账号配置带到云端。请在 Vercel 环境变量中配置：
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `AUTH_TOKENS` | 本地 API key，多个值用逗号、分号或换行分隔 |
+| `CHATGPT_ACCESS_TOKENS` | 上游 ChatGPT access token，多个值用逗号、分号或换行分隔 |
+| `PROXY` | 可选，全局代理 |
+| `CHATGPT_BASE_URL` | 可选，默认 `https://chatgpt.com` |
+| `LOG_LEVEL` | 可选，默认 `debug` |
+| `VERCEL_CONFIG_FILE` | 可选，显式指定要读取的 YAML 配置文件路径，例如 `conf/app.prod.yaml` |
 
 默认 `compose.yaml` 将容器 `3040` 端口映射到宿主机 `7846`，并映射本地配置与日志目录：
 
@@ -192,8 +205,13 @@ curl http://127.0.0.1:3040/v1/responses \
 
 ## Powered By
 
-- Codex
-- aurorax-neo
+- codex
+- [aurorax-neo](https://github.com/aurorax-neo)
+
+## Friend Links
+
+- [linux.do](https://linux.do/)
+- [xiaozhou26](https://github.com/xiaozhou26)
 
 ## Sponsor
 

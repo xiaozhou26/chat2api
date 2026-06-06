@@ -1,8 +1,8 @@
-package types
+package chat
 
 import "time"
 
-type ChatResp struct {
+type Response struct {
 	Message struct {
 		Id     string `json:"id"`
 		Author struct {
@@ -25,12 +25,11 @@ type ChatResp struct {
 		Metadata  Metadata    `json:"metadata"`
 		Recipient string      `json:"recipient"`
 	} `json:"message"`
-	ConversationId string      `json:"conversation_id"`
-	Error          interface{} `json:"error"`
-	// 审核
-	Type               string `json:"types"`
-	MessageId          string `json:"message_id"`
-	IsCompletion       bool   `json:"is_completion"`
+	ConversationId     string      `json:"conversation_id"`
+	Error              interface{} `json:"error"`
+	Type               string      `json:"types"`
+	MessageId          string      `json:"message_id"`
+	IsCompletion       bool        `json:"is_completion"`
 	ModerationResponse struct {
 		Flagged      bool          `json:"flagged"`
 		Disclaimers  []interface{} `json:"disclaimers"`
@@ -39,51 +38,7 @@ type ChatResp struct {
 	} `json:"moderation_response"`
 }
 
-type DalleContent struct {
-	AssetPointer string `json:"asset_pointer"`
-	Metadata     struct {
-		Dalle struct {
-			Prompt string `json:"prompt"`
-		} `json:"dalle"`
-	} `json:"metadata"`
-}
-
-type Metadata struct {
-	Timestamp     string         `json:"timestamp_"`
-	Citations     []Citation     `json:"citations,omitempty"`
-	MessageType   string         `json:"message_type"`
-	FinishDetails *FinishDetails `json:"finish_details"`
-	ModelSlug     string         `json:"model_slug"`
-
-	GizmoId           interface{} `json:"gizmo_id"`
-	DefaultModelSlug  string      `json:"default_model_slug"`
-	Pad               string      `json:"pad"`
-	ParentId          string      `json:"parent_id"`
-	ModelSwitcherDeny []struct {
-		Slug        string `json:"slug"`
-		Context     string `json:"context"`
-		Reason      string `json:"reason"`
-		Description string `json:"description"`
-	} `json:"model_switcher_deny"`
-}
-
-type Citation struct {
-	Metadata CitaMeta `json:"metadata"`
-	StartIx  int      `json:"start_ix"`
-	EndIx    int      `json:"end_ix"`
-}
-
-type CitaMeta struct {
-	URL   string `json:"url"`
-	Title string `json:"title"`
-}
-
-type FinishDetails struct {
-	Type string `json:"types"`
-	Stop string `json:"stop"`
-}
-
-type ChatRespInfo struct {
+type Info struct {
 	Type         string    `json:"types"`
 	CallToAction string    `json:"call_to_action"`
 	ResetsAfter  time.Time `json:"resets_after"`
@@ -100,13 +55,4 @@ type ChatRespInfo struct {
 		MarkdownDescription interface{} `json:"markdown_description"`
 	} `json:"display_description"`
 	ConversationId string `json:"conversation_id"`
-}
-
-type GenericResponseLine struct {
-	Line  string `json:"line"`
-	Error string `json:"error"`
-}
-
-type StringStruct struct {
-	Text string `json:"text"`
 }

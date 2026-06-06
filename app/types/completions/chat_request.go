@@ -1,23 +1,22 @@
-package chat_backend
+package completions
 
 import (
 	"strings"
 
-	"chat2api/app/types"
-	"chat2api/app/types/completions"
+	"chat2api/app/types/chat"
 
 	"github.com/google/uuid"
 )
 
-func BuildChatRequest(apiReq *completions.ApiReq) *types.ChatReq {
-	messages := make([]types.ChatMessages, 0, len(apiReq.Messages))
+func BuildChatRequest(apiReq *ApiReq) *chat.Request {
+	messages := make([]chat.Message, 0, len(apiReq.Messages))
 	for _, apiMessage := range apiReq.Messages {
-		messages = append(messages, types.ChatMessages{
+		messages = append(messages, chat.Message{
 			Id: uuid.New().String(),
-			Author: types.ChatAuthor{
+			Author: chat.Author{
 				Role: apiMessage.Role,
 			},
-			Content: types.ChatContent{
+			Content: chat.Content{
 				ContentType: "text",
 				Parts:       []string{apiMessage.Content},
 			},
@@ -28,7 +27,7 @@ func BuildChatRequest(apiReq *completions.ApiReq) *types.ChatReq {
 		parentMessageId = uuid.New().String()
 	}
 
-	return &types.ChatReq{
+	return &chat.Request{
 		Action:                     "next",
 		Messages:                   messages,
 		ConversationId:             strings.TrimSpace(apiReq.ConversationId),
@@ -47,11 +46,11 @@ func BuildChatRequest(apiReq *completions.ApiReq) *types.ChatReq {
 		ForceRateLimit:             false,
 		ResetRateLimits:            false,
 		VariantPurpose:             "comparison_implicit",
-		ConversationMode: types.ChatConversationMode{
+		ConversationMode: chat.ConversationMode{
 			Kind: "primary_assistant",
 		},
 		WebsocketRequestId: uuid.New().String(),
-		ClientContextualInfo: types.ClientContextualInfo{
+		ClientContextualInfo: chat.ClientContextualInfo{
 			IsDarkMode:      false,
 			TimeSinceLoaded: 120,
 			PageHeight:      900,

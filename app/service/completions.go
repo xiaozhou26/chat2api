@@ -3,10 +3,9 @@ package service
 import (
 	"bufio"
 	"bytes"
-	"chat2api/app/acc_token_pool"
-	"chat2api/app/chat_backend"
 	"chat2api/app/common"
-	"chat2api/app/types"
+	"chat2api/app/token_pool"
+	"chat2api/app/types/chat"
 	"chat2api/app/types/completions"
 	"chat2api/pkg/logx"
 	"encoding/json"
@@ -18,68 +17,31 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aurorax-neo/tls_client_httpi"
 	"github.com/gin-gonic/gin"
 )
 
 func Completions(c *gin.Context) {
-	// 从请求中获取参数
 	apiReq := &completions.ApiReq{}
 	err := c.BindJSON(apiReq)
 	if err != nil {
 		common.ErrorResponse(c, http.StatusBadRequest, "Invalid parameter", nil)
 		return
 	}
-	// 转换请求
-	ChatReq35 := chat_backend.BuildChatRequest(apiReq)
-	if ChatReq35.Model == "" {
+	chatReq := completions.BuildChatRequest(apiReq)
+	if chatReq.Model == "" {
 		errStr := fmt.Sprint("Model is unsupported")
 		logx.WithContext(c.Request.Context()).Error(errStr)
 		common.ErrorResponse(c, http.StatusBadRequest, errStr, nil)
 		return
 	}
-	// 请求参数
-	_, err = common.Struct2BytesBuffer(ChatReq35)
-	if err != nil {
-		logx.WithContext(c.Request.Context()).Error(err.Error())
-		common.ErrorResponse(c, http.StatusInternalServerError, "", err)
-		return
-
-	}
-	body, err := common.Struct2BytesBuffer(ChatReq35)
-	if err != nil {
-		logx.WithContext(c.Request.Context()).Error(err.Error())
-		common.ErrorResponse(c, http.StatusInternalServerError, "", err)
-		return
-	}
-	authToken := c.Request.Header.Get("Authorization")
-	backend, err := chat_backend.New(authToken, chat_backend.Retry())
-	if err != nil {
-		logx.WithContext(c.Request.Context()).Error(err.Error())
-		common.ErrorResponse(c, http.StatusBadGateway, err.Error(), nil)
-		return
-	}
-	headers, cookies := backend.Headers(backend.ChatURL)
-	headers.Set("accept", "text/event-stream")
-	headers.Set("content-type", "application/json")
-	headers.Set("openai-sentinel-chat-requirements-token", backend.Auth.Token)
-	if backend.Auth.ProofWork.Ospt != "" {
-		headers.Set("openai-sentinel-proof-token", backend.Auth.ProofWork.Ospt)
-	}
-	if backend.Auth.TurnstileToken != "" {
-		headers.Set("openai-sentinel-turnstile-token", backend.Auth.TurnstileToken)
-	}
-	if backend.Auth.SoToken != "" {
-		headers.Set("openai-sentinel-so-token", backend.Auth.SoToken)
-	}
-	response, err := backend.HTTP.Request(tls_client_httpi.POST, backend.ChatURL, headers, cookies, body)
+	response, accessToken, err := sendChatRequest(c, chatReq)
 	if err != nil {
 		logx.WithContext(c.Request.Context()).Error(err.Error())
 		common.ErrorResponse(c, http.StatusBadGateway, "upstream request failed", err.Error())
 		return
 	}
 	defer response.Body.Close()
-	if handleResponseError(c, response, backend.AccAuth) {
+	if handleResponseError(c, response, accessToken) {
 		return
 	}
 	result, err := handlerResponse(c, apiReq, response)
@@ -89,7 +51,7 @@ func Completions(c *gin.Context) {
 		return
 	}
 	if !apiReq.Stream {
-		resp := completions.NewApiRespJson(chat_backend.GenerateCompletionID(29), apiReq.Model, result.Content)
+		resp := completions.NewApiRespJson(completions.GenerateCompletionID(29), apiReq.Model, result.Content)
 		resp.ConversationId = result.ConversationId
 		resp.MessageId = result.MessageId
 		c.JSON(http.StatusOK, resp)
@@ -103,7 +65,7 @@ func handleResponseError(c *gin.Context, response *http.Response, accessToken st
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
 	if response.StatusCode == http.StatusTooManyRequests {
 		canUseAt := rateLimitCanUseAt(response, body)
-		acc_token_pool.GetAccAuthPoolInstance().SetCanUseAt(accessToken, canUseAt)
+		token_pool.GetAccessTokenPool().SetCanUseAt(accessToken, canUseAt)
 	}
 	var errorResponse map[string]interface{}
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&errorResponse); err != nil {
@@ -201,8 +163,6 @@ func normalizeRateLimitUnix(value int64, now time.Time) int64 {
 	if value <= 0 {
 		return 0
 	}
-	// Small values from Retry-After/reset_after are durations in seconds;
-	// large values are treated as absolute Unix timestamps.
 	if value < 30*24*3600 {
 		return now.Add(time.Duration(value) * time.Second).Unix()
 	}
@@ -235,20 +195,20 @@ type chatResult struct {
 	Content        string
 	ConversationId string
 	MessageId      string
+	FinishReason   string
 }
 
-func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Response) (*chatResult, error) {
+type chatStreamEvent struct {
+	Response     chat.Response
+	Delta        string
+	IsFirstChunk bool
+	Result       *chatResult
+}
+
+func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) (*chatResult, error) {
 	reader := bufio.NewReader(resp.Body)
-	if apiReq.Stream {
-		c.Header("Content-Type", "text/event-stream")
-	} else {
-		c.Header("Content-Type", "application/json")
-	}
-	id := chat_backend.GenerateCompletionID(29)
-	var previousText types.StringStruct
-	var finishReason string
-	var isRole = true
-	var contentParts []string
+	var previousText chat.StringStruct
+	isFirstChunk := true
 	result := &chatResult{}
 	for {
 		line, err := reader.ReadString('\n')
@@ -268,7 +228,7 @@ func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Resp
 		if payload == "[DONE]" {
 			break
 		}
-		var chatResp types.ChatResp
+		var chatResp chat.Response
 		if err := json.Unmarshal([]byte(payload), &chatResp); err != nil {
 			continue
 		}
@@ -292,27 +252,67 @@ func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Resp
 		if chatResp.Message.Content.ContentType != "" && !strings.HasSuffix(chatResp.Message.Content.ContentType, "text") {
 			continue
 		}
-		responseString := completions.ConvertToString(id, apiReq.Model, &chatResp, &previousText, isRole)
-		if responseString == "" {
+		if len(chatResp.Message.Content.Parts) == 0 {
 			continue
 		}
-		isRole = false
-		contentParts = append(contentParts, strings.TrimPrefix(responseString, "data: "))
-		if apiReq.Stream {
-			if _, err := c.Writer.WriteString(responseString); err != nil {
+		text, ok := chatResp.Message.Content.Parts[0].(string)
+		if !ok {
+			continue
+		}
+		delta := completions.DeltaText(text, previousText.Text)
+		if !isFirstChunk && delta == "" {
+			continue
+		}
+		previousText.Text = text
+		if onEvent != nil {
+			if err := onEvent(chatStreamEvent{
+				Response:     chatResp,
+				Delta:        delta,
+				IsFirstChunk: isFirstChunk,
+				Result:       result,
+			}); err != nil {
 				return nil, err
 			}
-			c.Writer.Flush()
 		}
+		isFirstChunk = false
 		if chatResp.Message.Metadata.FinishDetails != nil {
-			finishReason = chatResp.Message.Metadata.FinishDetails.Type
+			result.FinishReason = chatResp.Message.Metadata.FinishDetails.Type
 		}
 	}
+	result.Content = previousText.Text
+	return result, nil
+}
+
+func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Response) (*chatResult, error) {
 	if apiReq.Stream {
-		finalLine := completions.StopChunk(id, apiReq.Model, finishReason)
+		c.Header("Content-Type", "text/event-stream")
+	} else {
+		c.Header("Content-Type", "application/json")
+	}
+	id := completions.GenerateCompletionID(29)
+	result, err := handleChatStream(resp, func(event chatStreamEvent) error {
+		if !apiReq.Stream {
+			return nil
+		}
+		apiRespJson := completions.NewApiRespStream(id, apiReq.Model, event.Delta)
+		apiRespJson.ConversationId = event.Response.ConversationId
+		apiRespJson.MessageId = event.Response.Message.Id
+		if event.IsFirstChunk {
+			apiRespJson.Choices[0].Delta.Role = event.Response.Message.Author.Role
+		}
+		if _, err := c.Writer.WriteString("data: " + apiRespJson.String() + "\n\n"); err != nil {
+			return err
+		}
+		c.Writer.Flush()
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if apiReq.Stream {
+		finalLine := completions.StopChunk(id, apiReq.Model, result.FinishReason)
 		_, _ = c.Writer.WriteString(fmt.Sprint("data: ", finalLine.String(), "\n\n"))
 		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
 	}
-	result.Content = previousText.Text
 	return result, nil
 }

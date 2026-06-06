@@ -1,4 +1,4 @@
-package chat_backend
+package chatgpt_backend
 
 import (
 	"bytes"
@@ -7,19 +7,17 @@ import (
 	"io"
 	"strings"
 
-	"chat2api/app/acc_token_pool"
 	"chat2api/app/common"
 	"chat2api/app/conf"
 	"chat2api/app/constant"
-	"chat2api/app/proof_work"
-	"chat2api/app/turnstile"
+	"chat2api/app/token_pool"
 
 	"github.com/aurorax-neo/tls_client_httpi"
 	"github.com/aurorax-neo/tls_client_httpi/tls_client"
 	"github.com/google/uuid"
 )
 
-type Backend struct {
+type Client struct {
 	HTTP      tls_client_httpi.TCHI
 	Auth      *chatRequirements
 	AccAuth   string
@@ -28,18 +26,18 @@ type Backend struct {
 	UserAgent string
 	SessionID string
 	Cookies   tls_client_httpi.Cookies
-	Pow       proof_work.Resources
+	Pow       Resources
 }
 
 type chatRequirements struct {
-	OaiDeviceID    string               `json:"-"`
-	Arkose         challenge            `json:"arkose"`
-	Turnstile      challenge            `json:"turnstile"`
-	TurnstileToken string               `json:"-"`
-	ProofWork      proof_work.ProofWork `json:"proofofwork"`
-	Token          string               `json:"token"`
-	SoToken        string               `json:"so_token"`
-	ForceLogin     bool                 `json:"force_login"`
+	OaiDeviceID    string    `json:"-"`
+	Arkose         challenge `json:"arkose"`
+	Turnstile      challenge `json:"turnstile"`
+	TurnstileToken string    `json:"-"`
+	ProofWork      ProofWork `json:"proofofwork"`
+	Token          string    `json:"token"`
+	SoToken        string    `json:"so_token"`
+	ForceLogin     bool      `json:"force_login"`
 }
 
 type challenge struct {
@@ -47,42 +45,43 @@ type challenge struct {
 	Dx       string `json:"dx"`
 }
 
-func New(token string, retry int) (*Backend, error) {
+func New(token string, retry int) (*Client, error) {
 	token = strings.TrimSpace(token)
 	localToken := strings.TrimSpace(strings.TrimPrefix(token, "Bearer "))
 	if strings.HasPrefix(localToken, "at-") {
-		return newBackend("Bearer "+strings.TrimPrefix(localToken, "at-"), "")
+		return newClient("Bearer "+strings.TrimPrefix(localToken, "at-"), "")
 	}
 	if strings.HasPrefix(token, "Bearer eyJhbGciOiJSUzI1NiI") {
-		return newBackend(token, "")
+		return newClient(token, "")
 	}
-	if !acc_token_pool.GetAccAuthPoolInstance().IsEmpty() {
-		accessToken := acc_token_pool.GetAccAuthPoolInstance().GetAccessToken()
+	if !token_pool.GetAccessTokenPool().IsEmpty() {
+		accessToken := token_pool.GetAccessTokenPool().GetAccessToken()
 		if accessToken == nil || accessToken.Token == "" {
 			return nil, fmt.Errorf("access token pool is empty")
 		}
-		backend, err := newBackend(accessToken.Token, accessToken.Proxy)
-		if backend == nil && retry > 0 {
+		client, err := newClient(accessToken.Token, accessToken.Proxy)
+		if client == nil && retry > 0 {
 			return New(token, retry-1)
 		}
-		return backend, err
+		return client, err
 	}
 	if strings.HasPrefix(localToken, "sk-") {
 		return nil, fmt.Errorf("access token pool is empty")
 	}
-	backend, err := newBackend(token, "")
-	if backend == nil && retry > 0 {
+	client, err := newClient(token, "")
+	if client == nil && retry > 0 {
 		return New(token, retry-1)
 	}
-	return backend, err
+	return client, err
 }
 
-func newBackend(token string, accountProxy string) (*Backend, error) {
-	baseURL := strings.TrimRight(conf.App.ChatGPTBaseUrl, "/")
+func newClient(token string, accountProxy string) (*Client, error) {
+	appConf := conf.GetApp()
+	baseURL := strings.TrimRight(appConf.ChatGPTBaseUrl, "/")
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com"
 	}
-	b := &Backend{
+	c := &Client{
 		HTTP:      tls_client.NewClient(tls_client.NewClientOptions(300, common.GetClientProfile())),
 		Auth:      &chatRequirements{OaiDeviceID: uuid.New().String()},
 		BaseURL:   baseURL,
@@ -90,36 +89,36 @@ func newBackend(token string, accountProxy string) (*Backend, error) {
 		UserAgent: common.GetUa(),
 		SessionID: uuid.New().String(),
 	}
-	if b.HTTP == nil {
+	if c.HTTP == nil {
 		return nil, fmt.Errorf("http client is nil")
 	}
 	if strings.HasPrefix(token, "Bearer ") {
-		b.AccAuth = token
-		b.ChatURL = baseURL + "/backend-api/conversation"
+		c.AccAuth = token
+		c.ChatURL = baseURL + "/backend-api/conversation"
 	}
 	proxy := strings.TrimSpace(accountProxy)
 	if proxy == "" {
-		proxy = strings.TrimSpace(conf.App.Proxy)
+		proxy = strings.TrimSpace(appConf.Proxy)
 	}
 	if proxy != "" {
-		if err := b.HTTP.SetProxy(proxy); err != nil {
+		if err := c.HTTP.SetProxy(proxy); err != nil {
 			return nil, err
 		}
 	}
-	b.loadPowResources()
-	if err := b.loadRequirements(); err != nil {
+	c.loadPowResources()
+	if err := c.loadRequirements(); err != nil {
 		return nil, err
 	}
-	return b, nil
+	return c, nil
 }
 
-func (b *Backend) Headers(url string) (tls_client_httpi.Headers, tls_client_httpi.Cookies) {
+func (c *Client) Headers(url string) (tls_client_httpi.Headers, tls_client_httpi.Cookies) {
 	headers := tls_client_httpi.Headers{}
-	path := strings.TrimPrefix(url, b.BaseURL)
+	path := strings.TrimPrefix(url, c.BaseURL)
 	headers.Set("accept", "*/*")
 	headers.Set("accept-language", "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7")
-	headers.Set("origin", b.BaseURL)
-	headers.Set("referer", b.BaseURL+"/")
+	headers.Set("origin", c.BaseURL)
+	headers.Set("referer", c.BaseURL+"/")
 	headers.Set("cache-control", "no-cache")
 	headers.Set("pragma", "no-cache")
 	headers.Set("priority", "u=1, i")
@@ -135,24 +134,24 @@ func (b *Backend) Headers(url string) (tls_client_httpi.Headers, tls_client_http
 	headers.Set("sec-fetch-dest", "empty")
 	headers.Set("sec-fetch-mode", "cors")
 	headers.Set("sec-fetch-site", "same-origin")
-	headers.Set("user-agent", b.UserAgent)
-	headers.Set("oai-device-id", b.Auth.OaiDeviceID)
-	headers.Set("oai-session-id", b.SessionID)
+	headers.Set("user-agent", c.UserAgent)
+	headers.Set("oai-device-id", c.Auth.OaiDeviceID)
+	headers.Set("oai-session-id", c.SessionID)
 	headers.Set("oai-language", "zh-CN")
 	headers.Set("oai-client-version", "prod-3b8f2c1740596d77c64c1d3d50205828839b2730")
 	headers.Set("oai-client-build-number", "3310101057")
 	headers.Set("x-openai-target-path", path)
 	headers.Set("x-openai-target-route", path)
-	if b.AccAuth != "" {
-		headers.Set("authorization", b.AccAuth)
+	if c.AccAuth != "" {
+		headers.Set("authorization", c.AccAuth)
 	}
-	return headers, b.Cookies
+	return headers, c.Cookies
 }
 
-func (b *Backend) loadPowResources() {
-	headers, cookies := b.Headers(b.BaseURL + "/")
+func (c *Client) loadPowResources() {
+	headers, cookies := c.Headers(c.BaseURL + "/")
 	headers.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	response, err := b.HTTP.Request(tls_client_httpi.GET, b.BaseURL+"/", headers, cookies, nil)
+	response, err := c.HTTP.Request(tls_client_httpi.GET, c.BaseURL+"/", headers, cookies, nil)
 	if err != nil {
 		return
 	}
@@ -161,19 +160,19 @@ func (b *Backend) loadPowResources() {
 	if err != nil {
 		return
 	}
-	b.Pow = proof_work.ParseResources(string(body))
+	c.Pow = ParseResources(string(body))
 }
 
-func (b *Backend) loadRequirements() error {
-	authURL := b.BaseURL + "/backend-anon/sentinel/chat-requirements"
-	if b.AccAuth != "" {
-		authURL = b.BaseURL + "/backend-api/sentinel/chat-requirements"
+func (c *Client) loadRequirements() error {
+	authURL := c.BaseURL + "/backend-anon/sentinel/chat-requirements"
+	if c.AccAuth != "" {
+		authURL = c.BaseURL + "/backend-api/sentinel/chat-requirements"
 	}
-	requirementsToken := proof_work.LegacyRequirementsToken(b.UserAgent, b.Pow)
+	requirementsToken := LegacyRequirementsToken(c.UserAgent, c.Pow)
 	body := bytes.NewBufferString(`{"p":"` + requirementsToken + `"}`)
-	headers, cookies := b.Headers(authURL)
+	headers, cookies := c.Headers(authURL)
 	headers.Set("content-type", "application/json")
-	response, err := b.HTTP.Request(tls_client_httpi.POST, authURL, headers, cookies, body)
+	response, err := c.HTTP.Request(tls_client_httpi.POST, authURL, headers, cookies, body)
 	if err != nil {
 		return err
 	}
@@ -182,37 +181,37 @@ func (b *Backend) loadRequirements() error {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return fmt.Errorf("chat requirements failed: status=%d body=%s", response.StatusCode, string(detail))
 	}
-	if err := json.NewDecoder(response.Body).Decode(&b.Auth); err != nil {
+	if err := json.NewDecoder(response.Body).Decode(&c.Auth); err != nil {
 		return err
 	}
-	if b.Auth.ForceLogin {
+	if c.Auth.ForceLogin {
 		common.SubUpdateThreshold()
 		return fmt.Errorf("force login required")
 	}
-	if b.Auth.Arkose.Required {
+	if c.Auth.Arkose.Required {
 		return fmt.Errorf("arkose token is required")
 	}
-	if b.Auth.Turnstile.Required && b.Auth.Turnstile.Dx != "" {
+	if c.Auth.Turnstile.Required && c.Auth.Turnstile.Dx != "" {
 		sourceP := ""
-		if b.AccAuth == "" {
+		if c.AccAuth == "" {
 			sourceP = requirementsToken
 		}
-		b.Auth.TurnstileToken = turnstile.Solve(b.Auth.Turnstile.Dx, sourceP)
-		if b.Auth.TurnstileToken == "" {
+		c.Auth.TurnstileToken = Solve(c.Auth.Turnstile.Dx, sourceP)
+		if c.Auth.TurnstileToken == "" {
 			fallbackP := requirementsToken
 			if sourceP == requirementsToken {
 				fallbackP = ""
 			}
-			b.Auth.TurnstileToken = turnstile.Solve(b.Auth.Turnstile.Dx, fallbackP)
+			c.Auth.TurnstileToken = Solve(c.Auth.Turnstile.Dx, fallbackP)
 		}
 	}
-	if b.Auth.ProofWork.Required {
-		b.Auth.ProofWork.Ospt = proof_work.CalcProofToken(b.Auth.ProofWork.Seed, b.Auth.ProofWork.Difficulty, b.UserAgent, b.Pow)
-		if b.Auth.ProofWork.Ospt == "" {
+	if c.Auth.ProofWork.Required {
+		c.Auth.ProofWork.Ospt = CalcProofToken(c.Auth.ProofWork.Seed, c.Auth.ProofWork.Difficulty, c.UserAgent, c.Pow)
+		if c.Auth.ProofWork.Ospt == "" {
 			return fmt.Errorf("proof token failed")
 		}
 	}
-	if b.Auth.Token == "" {
+	if c.Auth.Token == "" {
 		return fmt.Errorf("missing chat requirements token")
 	}
 	return nil

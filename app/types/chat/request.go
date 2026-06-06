@@ -1,27 +1,27 @@
-package types
+package chat
 
-type ChatAuthor struct {
+type Author struct {
 	Role string `json:"role"`
 }
 
-type ChatContent struct {
+type Content struct {
 	ContentType string   `json:"content_type"`
 	Parts       []string `json:"parts"`
 }
 
-type ChatMessages struct {
-	Id      string      `json:"id"`
-	Author  ChatAuthor  `json:"author"`
-	Content ChatContent `json:"content"`
+type Message struct {
+	Id      string  `json:"id"`
+	Author  Author  `json:"author"`
+	Content Content `json:"content"`
 }
 
-type ChatConversationMode struct {
+type ConversationMode struct {
 	Kind string `json:"kind"`
 }
 
-type ChatReq struct {
+type Request struct {
 	Action                     string               `json:"action"`
-	Messages                   []ChatMessages       `json:"messages"`
+	Messages                   []Message            `json:"messages"`
 	ConversationId             string               `json:"conversation_id,omitempty"`
 	ParentMessageId            string               `json:"parent_message_id"`
 	Model                      string               `json:"model"`
@@ -38,7 +38,7 @@ type ChatReq struct {
 	ForceRateLimit             bool                 `json:"force_rate_limit"`
 	ResetRateLimits            bool                 `json:"reset_rate_limits"`
 	VariantPurpose             string               `json:"variant_purpose"`
-	ConversationMode           ChatConversationMode `json:"conversation_mode"`
+	ConversationMode           ConversationMode     `json:"conversation_mode"`
 	WebsocketRequestId         string               `json:"websocket_request_id"`
 	ClientContextualInfo       ClientContextualInfo `json:"client_contextual_info"`
 }

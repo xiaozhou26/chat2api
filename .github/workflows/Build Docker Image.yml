@@ -9,9 +9,6 @@ permissions:
   packages: write
   actions: write
 
-env:
-  GHCR_REPO: ghcr.io/aurorax-neo/chat2api
-
 jobs:
   main:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release-v')
@@ -35,6 +32,20 @@ jobs:
           fi
           echo "tag=${release_tag#release-v}" >> "$GITHUB_OUTPUT"
 
+      - name: Get Docker Image Repository
+        shell: bash
+        id: get_docker_image_repo
+        env:
+          GHCR_REPO_SECRET: ${{ secrets.GHCR_REPO }}
+        run: |
+          if [ -n "$GHCR_REPO_SECRET" ]; then
+            image_repo="$GHCR_REPO_SECRET"
+          else
+            image_repo="ghcr.io/${{ github.repository }}"
+          fi
+          image_repo="$(printf '%s' "$image_repo" | tr '[:upper:]' '[:lower:]')"
+          echo "repo=$image_repo" >> "$GITHUB_OUTPUT"
+
       - name: Set Up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -42,8 +53,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GB_TOKEN }}
+          username: ${{ secrets.GHCR_USERNAME || github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || github.token }}
 
       - name: Cache Docker Layers
         uses: actions/cache@v4
@@ -61,9 +72,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           file: Dockerfile
           tags: |
-            ${{ env.GHCR_REPO }}:latest
-            ${{ env.GHCR_REPO }}:${{ steps.get_docker_image_tag.outputs.tag }}
-            ${{ env.GHCR_REPO }}:${{ github.sha }}
+            ${{ steps.get_docker_image_repo.outputs.repo }}:latest
+            ${{ steps.get_docker_image_repo.outputs.repo }}:${{ steps.get_docker_image_tag.outputs.tag }}
+            ${{ steps.get_docker_image_repo.outputs.repo }}:${{ github.sha }}
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
 

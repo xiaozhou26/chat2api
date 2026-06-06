@@ -1,4 +1,4 @@
-package chat_backend
+package completions
 
 import "math/rand"
 

@@ -18,7 +18,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		ctx := logx.TagContext(context.Background(), "vercel")
 		logx.SetLevel(logrus.DebugLevel)
 		logx.SetFormatter(&logx.TextFormatter{})
-		conf.Init(ctx)
+		conf.InitServerless(ctx)
 	})
 	router.HandlerGinEngine(w, r)
 }
