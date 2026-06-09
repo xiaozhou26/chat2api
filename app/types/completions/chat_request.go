@@ -11,15 +11,13 @@ import (
 func BuildChatRequest(apiReq *ApiReq) *chat.Request {
 	messages := make([]chat.Message, 0, len(apiReq.Messages))
 	for _, apiMessage := range apiReq.Messages {
+		content := chatContentFromOpenAI(apiMessage.Content)
 		messages = append(messages, chat.Message{
 			Id: uuid.New().String(),
 			Author: chat.Author{
 				Role: apiMessage.Role,
 			},
-			Content: chat.Content{
-				ContentType: "text",
-				Parts:       []string{apiMessage.Content},
-			},
+			Content: content,
 		})
 	}
 	parentMessageId := strings.TrimSpace(apiReq.ParentMessageId)
@@ -60,6 +58,77 @@ func BuildChatRequest(apiReq *ApiReq) *chat.Request {
 			ScreenWidth:     2560,
 		},
 	}
+}
+
+func chatContentFromOpenAI(content interface{}) chat.Content {
+	textParts := make([]string, 0)
+	imageParts := make([]interface{}, 0)
+	collectOpenAIContent(content, &textParts, &imageParts)
+	text := strings.TrimSpace(strings.Join(textParts, ""))
+	if len(imageParts) == 0 {
+		return chat.Content{ContentType: "text", Parts: []interface{}{text}}
+	}
+	parts := make([]interface{}, 0, len(imageParts)+1)
+	parts = append(parts, imageParts...)
+	if text != "" {
+		parts = append(parts, text)
+	}
+	return chat.Content{ContentType: "multimodal_text", Parts: parts}
+}
+
+func collectOpenAIContent(value interface{}, textParts *[]string, imageParts *[]interface{}) {
+	switch v := value.(type) {
+	case string:
+		*textParts = append(*textParts, v)
+	case []interface{}:
+		for _, item := range v {
+			collectOpenAIContent(item, textParts, imageParts)
+		}
+	case map[string]interface{}:
+		partType := strings.TrimSpace(stringValue(v["type"]))
+		switch partType {
+		case "text", "input_text", "output_text":
+			*textParts = append(*textParts, stringValue(v["text"]))
+		case "image_url", "input_image", "image":
+			if image := imageValue(v); image != "" {
+				*imageParts = append(*imageParts, map[string]interface{}{"type": "input_image", "image_url": image})
+			}
+		default:
+			if content, ok := v["content"]; ok {
+				collectOpenAIContent(content, textParts, imageParts)
+			}
+		}
+	}
+}
+
+func stringValue(value interface{}) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func imageValue(item map[string]interface{}) string {
+	for _, key := range []string{"image_url", "url", "base64", "b64_json"} {
+		value, ok := item[key]
+		if !ok {
+			continue
+		}
+		if text := stringValue(value); text != "" {
+			return strings.TrimSpace(text)
+		}
+		if obj, ok := value.(map[string]interface{}); ok {
+			for _, nested := range []string{"url", "image_url", "base64", "b64_json"} {
+				if text := stringValue(obj[nested]); text != "" {
+					return strings.TrimSpace(text)
+				}
+			}
+		}
+	}
+	if source, ok := item["source"].(map[string]interface{}); ok && stringValue(source["type"]) == "base64" {
+		return strings.TrimSpace(stringValue(source["data"]))
+	}
+	return ""
 }
 
 func normalizeModel(model string) string {

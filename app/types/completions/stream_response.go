@@ -21,8 +21,26 @@ type ApiStreamChoice struct {
 }
 
 type ApiStreamDelta struct {
-	Content string `json:"content,omitempty"`
-	Role    string `json:"role,omitempty"`
+	Content            *string    `json:"content,omitempty"`
+	Role               string     `json:"role,omitempty"`
+	ToolCalls          []ToolCall `json:"tool_calls,omitempty"`
+	IncludeNullContent bool       `json:"-"`
+}
+
+func (d ApiStreamDelta) MarshalJSON() ([]byte, error) {
+	out := make(map[string]interface{})
+	if d.Role != "" {
+		out["role"] = d.Role
+	}
+	if d.Content != nil {
+		out["content"] = *d.Content
+	} else if d.IncludeNullContent {
+		out["content"] = nil
+	}
+	if len(d.ToolCalls) > 0 {
+		out["tool_calls"] = d.ToolCalls
+	}
+	return json.Marshal(out)
 }
 
 func (ARS *ApiRespStream) String() string {

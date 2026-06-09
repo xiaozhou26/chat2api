@@ -28,11 +28,13 @@
 # Go workspace file
 go.work
 
+test
 /logs/
 /.env
 /target/
 /CHANGELOG.md
 conf/**
 !/conf/app.demo.yaml
-chatgpt2api/**
-
+chatgpt2api
+aurora
+Toolify

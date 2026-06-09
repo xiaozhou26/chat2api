@@ -48,8 +48,9 @@ type challenge struct {
 func New(token string, retry int) (*Client, error) {
 	token = strings.TrimSpace(token)
 	localToken := strings.TrimSpace(strings.TrimPrefix(token, "Bearer "))
-	if strings.HasPrefix(localToken, "at-") {
-		return newClient("Bearer "+strings.TrimPrefix(localToken, "at-"), "")
+	appConf := conf.GetApp()
+	if accessToken, ok := appConf.DirectAccessToken(localToken); ok {
+		return newClient("Bearer "+accessToken, "")
 	}
 	if strings.HasPrefix(token, "Bearer eyJhbGciOiJSUzI1NiI") {
 		return newClient(token, "")
@@ -146,6 +147,17 @@ func (c *Client) Headers(url string) (tls_client_httpi.Headers, tls_client_httpi
 		headers.Set("authorization", c.AccAuth)
 	}
 	return headers, c.Cookies
+}
+
+func (c *Client) IsAuthenticated() bool {
+	return c.AccAuth != ""
+}
+
+func (c *Client) ChatTimezone() (string, int) {
+	if c.IsAuthenticated() {
+		return "Asia/Shanghai", -480
+	}
+	return "America/Los_Angeles", 480
 }
 
 func (c *Client) loadPowResources() {

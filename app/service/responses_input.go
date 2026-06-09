@@ -7,15 +7,10 @@ import (
 	"strings"
 )
 
-const responsesToolUnavailableSystemMessage = "This compatibility backend cannot execute local tools, shell commands, web searches, or file operations. Do not claim to have run tools or inspected external resources. If a user asks you to use a tool, say that tool execution is unavailable through this backend."
-
 func completionMessagesFromResponse(req *responses.ApiReq) []completions.ApiMessage {
 	messages := make([]completions.ApiMessage, 0)
 	if strings.TrimSpace(req.Instructions) != "" {
 		messages = append(messages, completions.ApiMessage{Role: "system", Content: strings.TrimSpace(req.Instructions)})
-	}
-	if hasResponsesNonImageTools(req.Tools) {
-		messages = append(messages, completions.ApiMessage{Role: "system", Content: responsesToolUnavailableSystemMessage})
 	}
 	return append(messages, completionMessagesFromResponseInput(req.Input)...)
 }
@@ -28,20 +23,38 @@ func completionMessagesFromResponseInput(input interface{}) []completions.ApiMes
 		}
 		return []completions.ApiMessage{{Role: "user", Content: strings.TrimSpace(v)}}
 	case map[string]interface{}:
-		return []completions.ApiMessage{{Role: responseStringValue(v["role"], "user"), Content: responseMessageContentText(v)}}
+		return []completions.ApiMessage{{Role: responseStringValue(v["role"], "user"), Content: responseMessageContent(v)}}
 	case []interface{}:
 		messages := make([]completions.ApiMessage, 0, len(v))
 		for _, item := range v {
 			if part, ok := item.(map[string]interface{}); ok {
-				text := responseMessageContentText(part)
-				if strings.TrimSpace(text) != "" {
-					messages = append(messages, completions.ApiMessage{Role: responseStringValue(part["role"], "user"), Content: text})
+				content := responseMessageContent(part)
+				if responseContentHasValue(content) {
+					messages = append(messages, completions.ApiMessage{Role: responseStringValue(part["role"], "user"), Content: content})
 				}
 			}
 		}
 		return messages
 	default:
 		return nil
+	}
+}
+
+func responseMessageContent(item map[string]interface{}) interface{} {
+	if content, ok := item["content"].([]interface{}); ok {
+		return content
+	}
+	return responseMessageContentText(item)
+}
+
+func responseContentHasValue(content interface{}) bool {
+	switch v := content.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case []interface{}:
+		return len(v) > 0
+	default:
+		return v != nil
 	}
 }
 
@@ -79,13 +92,65 @@ func isResponsesContentPart(item map[string]interface{}) bool {
 	}
 }
 
-func hasResponsesImageGenerationTool(tools []responses.Tool) bool {
+func hasResponsesImageGenerationTool(req *responses.ApiReq) bool {
+	if responseToolChoiceType(req.ToolChoice) == "image_generation" {
+		return true
+	}
+	tools := req.Tools
 	for _, tool := range tools {
 		if strings.TrimSpace(tool.Type) == "image_generation" {
 			return true
 		}
 	}
 	return false
+}
+
+func completionToolsFromResponses(tools []responses.Tool) []completions.Tool {
+	out := make([]completions.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if strings.TrimSpace(tool.Type) != "function" {
+			continue
+		}
+		out = append(out, completions.Tool{
+			Type: "function",
+			Function: completions.ToolFunction{
+				Name:        strings.TrimSpace(tool.Name),
+				Description: tool.Description,
+				Parameters:  tool.Parameters,
+				Strict:      tool.Strict,
+			},
+		})
+	}
+	return out
+}
+
+func completionToolChoiceFromResponses(value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		if strings.TrimSpace(responseStringValue(v["type"], "")) == "function" {
+			if _, ok := v["function"]; ok {
+				return v
+			}
+			if name := strings.TrimSpace(responseStringValue(v["name"], "")); name != "" {
+				return map[string]interface{}{
+					"type":     "function",
+					"function": map[string]interface{}{"name": name},
+				}
+			}
+		}
+	}
+	return value
+}
+
+func responseToolChoiceType(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]interface{}:
+		return strings.TrimSpace(responseStringValue(v["type"], ""))
+	default:
+		return ""
+	}
 }
 
 func hasResponsesNonImageTools(tools []responses.Tool) bool {

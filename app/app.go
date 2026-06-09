@@ -21,20 +21,7 @@ func Run(ctx context.Context) {
 	{
 		logx.SetLevel(logrus.DebugLevel)
 		logx.SetFormatter(func() logrus.Formatter {
-			//if conf.Env.ListByIDs() == "DEV" {
 			return &logx.TextFormatter{}
-			//}
-			//logx.SetReportCaller(true)
-			//return &logrus.JSONFormatter{
-			//	TimestampFormat:   time.DateTime,
-			//	DisableTimestamp:  false,
-			//	DisableHTMLEscape: false,
-			//	FieldMap:          nil,
-			//	CallerPrettyfier: func(frame *runtime.Frame) (function string, file string) {
-			//		return frame.Function, fmt.Sprintf("%s:%d", frame.File, frame.Line)
-			//	},
-			//	PrettyPrint: false,
-			//}
 		}())
 		ctx = logx.TagContext(ctx, "initial")
 		logx.WithContext(ctx).Infof("application process in PID: %v", os.Getpid())

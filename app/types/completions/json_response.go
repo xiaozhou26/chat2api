@@ -14,8 +14,9 @@ type ApiRespJson struct {
 }
 
 type ApiRespJsonMessage struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string     `json:"role,omitempty"`
+	Content   *string    `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ApiRespJsonChoice struct {
@@ -37,6 +38,7 @@ type ApiRespJsonUsage struct {
 }
 
 func NewApiRespJson(id string, model string, content string) *ApiRespJson {
+	contentPtr := content
 	return &ApiRespJson{
 		ID:      id,
 		Created: time.Now().Unix(),
@@ -51,11 +53,21 @@ func NewApiRespJson(id string, model string, content string) *ApiRespJson {
 			{
 				Message: ApiRespJsonMessage{
 					Role:    "assistant",
-					Content: content,
+					Content: &contentPtr,
 				},
 				FinishReason: "stop",
 				Index:        0,
 			},
 		},
 	}
+}
+
+func NewToolCallsApiRespJson(id string, model string, content string, toolCalls []ToolCall) *ApiRespJson {
+	resp := NewApiRespJson(id, model, content)
+	resp.Choices[0].Message.ToolCalls = toolCalls
+	resp.Choices[0].FinishReason = "tool_calls"
+	if content == "" {
+		resp.Choices[0].Message.Content = nil
+	}
+	return resp
 }

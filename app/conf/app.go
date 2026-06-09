@@ -1,5 +1,7 @@
 package conf
 
+import "strings"
+
 type app struct {
 	LogLevel       string    `yaml:"log_level"`
 	LogPath        string    `yaml:"log_path"`
@@ -23,7 +25,35 @@ func (a app) TextAccessTokens() []string {
 }
 
 type auth struct {
-	AccessTokens []string `yaml:"access_tokens"`
+	AccessTokens      []string `yaml:"access_tokens"`
+	AccessTokenPrefix []string `yaml:"access_token_prefix"`
+}
+
+func (a app) DirectAccessToken(localToken string) (string, bool) {
+	token, matched := a.matchAccessTokenPrefix(localToken)
+	return token, matched && token != ""
+}
+
+func (a app) DirectAccessTokenPrefixMatched(localToken string) bool {
+	_, matched := a.matchAccessTokenPrefix(localToken)
+	return matched
+}
+
+func (a app) HasAccessTokenPrefix() bool {
+	return len(a.Auth.AccessTokenPrefix) > 0
+}
+
+func (a app) matchAccessTokenPrefix(localToken string) (string, bool) {
+	localToken = strings.TrimSpace(localToken)
+	for _, prefix := range a.Auth.AccessTokenPrefix {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" || !strings.HasPrefix(localToken, prefix) {
+			continue
+		}
+		token := strings.TrimSpace(strings.TrimPrefix(localToken, prefix))
+		return token, true
+	}
+	return "", false
 }
 
 type chatgpt struct {

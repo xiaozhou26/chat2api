@@ -2,7 +2,7 @@
 # .chat2api/conf/app.dev.yaml when using docker compose.
 log_level: debug
 log_path: logs
-log_file: app.dev.log
+log_file: app.log
 bind: 127.0.0.1
 port: 3040
 
@@ -12,6 +12,13 @@ port: 3040
 auth:
   access_tokens:
     - sk-your-local-key
+  # Direct upstream access-token mode prefixes.
+  # Keep [] to disable direct mode. To enable it, set private prefixes, for example:
+  # access_token_prefix:
+  #   - your-private-prefix-
+  # Only Vercel/serverless can also set ACCESS_TOKEN_PREFIX or ACCESS_TOKEN_PREFIXES.
+  access_token_prefix:
+    - your-private-prefix-
 
 # Global proxy. Account-level proxy below has higher priority.
 proxy: http://127.0.0.1:7890

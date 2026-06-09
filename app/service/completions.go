@@ -20,11 +20,17 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var errToolCallsStreamFinished = errors.New("tool calls stream finished")
+
 func Completions(c *gin.Context) {
 	apiReq := &completions.ApiReq{}
 	err := c.BindJSON(apiReq)
 	if err != nil {
 		common.ErrorResponse(c, http.StatusBadRequest, "Invalid parameter", nil)
+		return
+	}
+	if err := prepareFunctionCallingRequest(apiReq); err != nil {
+		common.ErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 	chatReq := completions.BuildChatRequest(apiReq)
@@ -51,11 +57,37 @@ func Completions(c *gin.Context) {
 		return
 	}
 	if !apiReq.Stream {
-		resp := completions.NewApiRespJson(completions.GenerateCompletionID(29), apiReq.Model, result.Content)
+		id := completions.GenerateCompletionID(29)
+		resp := completions.NewApiRespJson(id, apiReq.Model, result.Content)
+		if len(result.ToolCalls) > 0 {
+			resp = completions.NewToolCallsApiRespJson(id, apiReq.Model, result.ToolContent, result.ToolCalls)
+		}
 		resp.ConversationId = result.ConversationId
 		resp.MessageId = result.MessageId
 		c.JSON(http.StatusOK, resp)
 	}
+}
+
+func prepareFunctionCallingRequest(apiReq *completions.ApiReq) error {
+	completions.NormalizeLegacyFunctions(apiReq)
+	hasTools := completions.HasTools(apiReq)
+	apiReq.HasToolResults = completions.MessagesContainToolResults(apiReq.Messages)
+	if completions.MessagesNeedPreprocess(apiReq.Messages) {
+		processed, err := completions.PreprocessMessages(apiReq.Messages)
+		if err != nil {
+			return err
+		}
+		apiReq.Messages = processed
+	}
+	if !hasTools {
+		return nil
+	}
+	prompt, err := completions.BuildFunctionPrompt(apiReq.Tools, apiReq.ToolChoice)
+	if err != nil {
+		return err
+	}
+	apiReq.Messages = append([]completions.ApiMessage{{Role: "system", Content: prompt}}, apiReq.Messages...)
+	return nil
 }
 
 func handleResponseError(c *gin.Context, response *http.Response, accessToken string) bool {
@@ -196,11 +228,14 @@ type chatResult struct {
 	ConversationId string
 	MessageId      string
 	FinishReason   string
+	ToolCalls      []completions.ToolCall
+	ToolContent    string
 }
 
 type chatStreamEvent struct {
 	Response     chat.Response
 	Delta        string
+	Text         string
 	IsFirstChunk bool
 	Result       *chatResult
 }
@@ -228,15 +263,14 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 		if payload == "[DONE]" {
 			break
 		}
+		var rawEvent map[string]interface{}
+		_ = json.Unmarshal([]byte(payload), &rawEvent)
 		var chatResp chat.Response
 		if err := json.Unmarshal([]byte(payload), &chatResp); err != nil {
 			continue
 		}
 		if chatResp.Error != nil {
 			return nil, fmt.Errorf("chatgpt error: %v", chatResp.Error)
-		}
-		if chatResp.Message.Author.Role != "assistant" || chatResp.Message.Content.Parts == nil {
-			continue
 		}
 		if chatResp.ConversationId != "" {
 			result.ConversationId = chatResp.ConversationId
@@ -249,14 +283,14 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 			chatResp.Message.Metadata.MessageType != "continue" {
 			continue
 		}
-		if chatResp.Message.Content.ContentType != "" && !strings.HasSuffix(chatResp.Message.Content.ContentType, "text") {
-			continue
+		text := chatResponseText(chatResp)
+		if text == "" {
+			text = assistantRawText(rawEvent, previousText.Text)
+			if text != "" && chatResp.Message.Author.Role == "" {
+				chatResp.Message.Author.Role = "assistant"
+			}
 		}
-		if len(chatResp.Message.Content.Parts) == 0 {
-			continue
-		}
-		text, ok := chatResp.Message.Content.Parts[0].(string)
-		if !ok {
+		if text == "" {
 			continue
 		}
 		delta := completions.DeltaText(text, previousText.Text)
@@ -268,10 +302,12 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 			if err := onEvent(chatStreamEvent{
 				Response:     chatResp,
 				Delta:        delta,
+				Text:         previousText.Text,
 				IsFirstChunk: isFirstChunk,
 				Result:       result,
 			}); err != nil {
-				return nil, err
+				result.Content = previousText.Text
+				return result, err
 			}
 		}
 		isFirstChunk = false
@@ -283,6 +319,172 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 	return result, nil
 }
 
+func chatResponseText(chatResp chat.Response) string {
+	if chatResp.Message.Author.Role != "assistant" {
+		return ""
+	}
+	if text := strings.TrimSpace(chatResp.Message.Content.Text); text != "" {
+		return text
+	}
+	if chatResp.Message.Content.ContentType != "" && !strings.Contains(chatResp.Message.Content.ContentType, "text") {
+		return ""
+	}
+	parts := make([]string, 0)
+	for _, part := range chatResp.Message.Content.Parts {
+		switch v := part.(type) {
+		case string:
+			parts = append(parts, v)
+		case map[string]interface{}:
+			if text := strings.TrimSpace(responseStringValue(v["text"], "")); text != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, ""))
+}
+
+func assistantRawText(event map[string]interface{}, currentText string) string {
+	if len(event) == 0 {
+		return ""
+	}
+	if text := assistantTextFromMessageMap(responseMapValue(event["message"])); text != "" {
+		return text
+	}
+	vMap := responseMapValue(event["v"])
+	if text := assistantTextFromMessageMap(responseMapValue(vMap["message"])); text != "" {
+		return text
+	}
+	if text, ok := applyAssistantTextPatch(event, currentText); ok {
+		return text
+	}
+	return ""
+}
+
+func assistantTextFromMessageMap(message map[string]interface{}) string {
+	if len(message) == 0 {
+		return ""
+	}
+	if author := responseMapValue(message["author"]); len(author) > 0 {
+		if role := strings.TrimSpace(responseStringValue(author["role"], "")); role != "" && role != "assistant" {
+			return ""
+		}
+	}
+	content := responseMapValue(message["content"])
+	if len(content) == 0 {
+		return ""
+	}
+	if text := strings.TrimSpace(responseStringValue(content["text"], "")); text != "" {
+		return text
+	}
+	contentType := strings.TrimSpace(responseStringValue(content["content_type"], ""))
+	if contentType != "" && !strings.Contains(contentType, "text") {
+		return ""
+	}
+	return strings.TrimSpace(textFromContentParts(content["parts"]))
+}
+
+func textFromContentParts(value interface{}) string {
+	parts, ok := value.([]interface{})
+	if !ok {
+		return ""
+	}
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		switch v := part.(type) {
+		case string:
+			texts = append(texts, v)
+		case map[string]interface{}:
+			if text := responseStringValue(v["text"], ""); text != "" {
+				texts = append(texts, text)
+			}
+		}
+	}
+	return strings.Join(texts, "")
+}
+
+func applyAssistantTextPatch(event map[string]interface{}, currentText string) (string, bool) {
+	path := responseStringValue(event["p"], responseStringValue(event["path"], ""))
+	if path != "" && !isAssistantTextPath(path) && !strings.HasPrefix(path, "/message/content/parts/0/") {
+		return "", false
+	}
+	op := responseStringValue(event["o"], responseStringValue(event["op"], ""))
+	if op == "patch" {
+		return applyAssistantTextPatchOps(event["v"], currentText)
+	}
+	if op == "append" || op == "add" {
+		return currentText + patchTextValue(event["v"]), true
+	}
+	if op == "replace" {
+		return patchTextValue(event["v"]), true
+	}
+	if value, ok := event["v"].(string); ok && value != "" && isAssistantTextPath(path) {
+		return currentText + value, true
+	}
+	return "", false
+}
+
+func applyAssistantTextPatchOps(value interface{}, currentText string) (string, bool) {
+	ops, ok := value.([]interface{})
+	if !ok {
+		return "", false
+	}
+	text := currentText
+	applied := false
+	for _, item := range ops {
+		opMap := responseMapValue(item)
+		if len(opMap) == 0 {
+			continue
+		}
+		path := responseStringValue(opMap["p"], responseStringValue(opMap["path"], ""))
+		if path != "" && !isAssistantTextPath(path) && !strings.HasPrefix(path, "/message/content/parts/0/") {
+			continue
+		}
+		op := responseStringValue(opMap["o"], responseStringValue(opMap["op"], ""))
+		switch op {
+		case "patch":
+			next, ok := applyAssistantTextPatchOps(opMap["v"], text)
+			if ok {
+				text = next
+				applied = true
+			}
+		case "append", "add":
+			text += patchTextValue(opMap["v"])
+			applied = true
+		case "replace":
+			text = patchTextValue(opMap["v"])
+			applied = true
+		}
+	}
+	return text, applied
+}
+
+func isAssistantTextPath(path string) bool {
+	return path == "" || path == "/message/content/parts/0" || path == "/message/content/text"
+}
+
+func patchTextValue(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case map[string]interface{}:
+		if text := responseStringValue(v["text"], ""); text != "" {
+			return text
+		}
+		return textFromContentParts(v["parts"])
+	case []interface{}:
+		return textFromContentParts(v)
+	default:
+		return ""
+	}
+}
+
+func responseMapValue(value interface{}) map[string]interface{} {
+	if v, ok := value.(map[string]interface{}); ok {
+		return v
+	}
+	return nil
+}
+
 func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Response) (*chatResult, error) {
 	if apiReq.Stream {
 		c.Header("Content-Type", "text/event-stream")
@@ -290,9 +492,14 @@ func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Resp
 		c.Header("Content-Type", "application/json")
 	}
 	id := completions.GenerateCompletionID(29)
+	hasTools := completions.HasTools(apiReq)
+	detector := completions.NewStreamToolDetector(completions.ToolifyTriggerSignal)
 	result, err := handleChatStream(resp, func(event chatStreamEvent) error {
 		if !apiReq.Stream {
 			return nil
+		}
+		if hasTools {
+			return streamFunctionCallingDelta(c, id, apiReq, detector, event)
 		}
 		apiRespJson := completions.NewApiRespStream(id, apiReq.Model, event.Delta)
 		apiRespJson.ConversationId = event.Response.ConversationId
@@ -306,8 +513,51 @@ func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Resp
 		c.Writer.Flush()
 		return nil
 	})
-	if err != nil {
+	if err != nil && err != errToolCallsStreamFinished {
 		return nil, err
+	}
+	if result == nil {
+		result = &chatResult{}
+	}
+	if hasTools && len(result.ToolCalls) == 0 {
+		if calls := completions.ParseFunctionCallsXML(result.Content, completions.ToolifyTriggerSignal); len(calls) > 0 {
+			if err := completions.ValidateParsedToolCalls(calls, apiReq.Tools); err == nil {
+				result.ToolCalls = completions.ToolCallsFromParsed(calls, false)
+				result.ToolContent = completions.ToolCallPrefixText(result.Content)
+				result.FinishReason = "tool_calls"
+			}
+		}
+	}
+	if !hasTools && apiReq.HasToolResults {
+		result.Content = completions.StripFunctionCallXML(result.Content)
+	}
+	if apiReq.Stream && hasTools {
+		if err == errToolCallsStreamFinished {
+			return result, nil
+		}
+		if detector.State() == "tool_parsing" {
+			if calls := detector.Finalize(); len(calls) > 0 {
+				if err := completions.ValidateParsedToolCalls(calls, apiReq.Tools); err == nil {
+					result.ToolCalls = completions.ToolCallsFromParsed(calls, true)
+					result.ToolContent = completions.ToolCallPrefixText(result.Content)
+					if writeErr := writeToolCallsStream(c, id, apiReq.Model, result.ToolCalls); writeErr != nil {
+						return nil, writeErr
+					}
+					return result, nil
+				}
+			}
+			if detector.Buffer() != "" {
+				apiRespJson := completions.NewApiRespStream(id, apiReq.Model, detector.Buffer())
+				if _, err := c.Writer.WriteString("data: " + apiRespJson.String() + "\n\n"); err != nil {
+					return nil, err
+				}
+			}
+		} else if text := detector.FlushText(); text != "" {
+			apiRespJson := completions.NewApiRespStream(id, apiReq.Model, text)
+			if _, err := c.Writer.WriteString("data: " + apiRespJson.String() + "\n\n"); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if apiReq.Stream {
 		finalLine := completions.StopChunk(id, apiReq.Model, result.FinishReason)
@@ -315,4 +565,66 @@ func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Resp
 		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
 	}
 	return result, nil
+}
+
+func streamFunctionCallingDelta(c *gin.Context, id string, apiReq *completions.ApiReq, detector *completions.StreamToolDetector, event chatStreamEvent) error {
+	if detector.State() == "tool_parsing" {
+		detector.AppendParsing(event.Delta)
+		if !detector.HasCompleteToolBlock() {
+			return nil
+		}
+		calls := detector.Finalize()
+		if len(calls) == 0 || completions.ValidateParsedToolCalls(calls, apiReq.Tools) != nil {
+			finalLine := completions.StopChunk(id, apiReq.Model, "stop")
+			if _, err := c.Writer.WriteString(fmt.Sprint("data: ", finalLine.String(), "\n\n")); err != nil {
+				return err
+			}
+			if _, err := c.Writer.WriteString("data: [DONE]\n\n"); err != nil {
+				return err
+			}
+			c.Writer.Flush()
+			return errToolCallsStreamFinished
+		}
+		event.Result.ToolCalls = completions.ToolCallsFromParsed(calls, true)
+		event.Result.ToolContent = completions.ToolCallPrefixText(event.Text)
+		event.Result.FinishReason = "tool_calls"
+		if err := writeToolCallsStream(c, id, apiReq.Model, event.Result.ToolCalls); err != nil {
+			return err
+		}
+		return errToolCallsStreamFinished
+	}
+
+	detected, content := detector.ProcessChunk(event.Delta)
+	if content != "" {
+		apiRespJson := completions.NewApiRespStream(id, apiReq.Model, content)
+		apiRespJson.ConversationId = event.Response.ConversationId
+		apiRespJson.MessageId = event.Response.Message.Id
+		if event.IsFirstChunk {
+			apiRespJson.Choices[0].Delta.Role = event.Response.Message.Author.Role
+		}
+		if _, err := c.Writer.WriteString("data: " + apiRespJson.String() + "\n\n"); err != nil {
+			return err
+		}
+		c.Writer.Flush()
+	}
+	if detected {
+		return nil
+	}
+	return nil
+}
+
+func writeToolCallsStream(c *gin.Context, id string, model string, toolCalls []completions.ToolCall) error {
+	toolChunk := completions.NewToolCallsApiRespStream(id, model, toolCalls)
+	if _, err := c.Writer.WriteString("data: " + toolChunk.String() + "\n\n"); err != nil {
+		return err
+	}
+	finalLine := completions.StopChunk(id, model, "tool_calls")
+	if _, err := c.Writer.WriteString(fmt.Sprint("data: ", finalLine.String(), "\n\n")); err != nil {
+		return err
+	}
+	if _, err := c.Writer.WriteString("data: [DONE]\n\n"); err != nil {
+		return err
+	}
+	c.Writer.Flush()
+	return nil
 }

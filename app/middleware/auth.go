@@ -12,8 +12,17 @@ func V1Auth(c *gin.Context) {
 	authToken := c.Request.Header.Get("Authorization")
 	localToken := strings.TrimSpace(strings.TrimPrefix(authToken, "Bearer "))
 	appConf := conf.GetApp()
-	if strings.HasPrefix(localToken, "at-") {
+	hasAccessTokenPrefix := appConf.HasAccessTokenPrefix()
+	if authToken == "" {
+		common.ErrorResponse(c, 401, missingAPIKeyMessage(hasAccessTokenPrefix), nil)
+		return
+	}
+	if _, ok := appConf.DirectAccessToken(localToken); ok {
 		c.Next()
+		return
+	}
+	if appConf.DirectAccessTokenPrefixMatched(localToken) {
+		common.ErrorResponse(c, 401, "Invalid access token for access_token_prefix mode. Use Authorization: Bearer <configured-prefix><real_access_token>.", nil)
 		return
 	}
 	if strings.HasPrefix(authToken, "Bearer eyJhbGciOiJSUzI1NiI") {
@@ -21,16 +30,33 @@ func V1Auth(c *gin.Context) {
 		return
 	}
 	if len(appConf.Auth.AccessTokens) == 0 {
-		common.ErrorResponse(c, 401, "No local API keys are configured", nil)
-		return
-	}
-	if authToken == "" {
-		common.ErrorResponse(c, 401, "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY)", nil)
+		common.ErrorResponse(c, 401, noLocalAPIKeysMessage(hasAccessTokenPrefix), nil)
 		return
 	}
 	if !common.IsStrInArray(localToken, appConf.Auth.AccessTokens) {
-		common.ErrorResponse(c, 401, "Incorrect API key provided: sk-4yNZz***************************************6mjw.", nil)
+		common.ErrorResponse(c, 401, incorrectAPIKeyMessage(hasAccessTokenPrefix), nil)
 		return
 	}
 	c.Next()
+}
+
+func missingAPIKeyMessage(hasAccessTokenPrefix bool) string {
+	if hasAccessTokenPrefix {
+		return "You didn't provide an API key. Use Authorization: Bearer <local-api-key>, or Authorization: Bearer <configured-prefix><real_access_token> for access_token_prefix mode."
+	}
+	return "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY)."
+}
+
+func noLocalAPIKeysMessage(hasAccessTokenPrefix bool) string {
+	if hasAccessTokenPrefix {
+		return "No local API keys are configured. Use Authorization: Bearer <configured-prefix><real_access_token> for access_token_prefix mode."
+	}
+	return "No local API keys are configured"
+}
+
+func incorrectAPIKeyMessage(hasAccessTokenPrefix bool) string {
+	if hasAccessTokenPrefix {
+		return "Incorrect API key provided. Use a configured local API key, or Authorization: Bearer <configured-prefix><real_access_token> for access_token_prefix mode."
+	}
+	return "Incorrect API key provided."
 }

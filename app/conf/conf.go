@@ -150,7 +150,7 @@ func defaultGeneratedApp(curr env.Env) app {
 		LogFile:        "",
 		Bind:           bind,
 		Port:           3040,
-		Auth:           auth{AccessTokens: []string{}},
+		Auth:           auth{AccessTokens: []string{}, AccessTokenPrefix: []string{}},
 		Proxy:          "",
 		ChatGPTBaseUrl: "https://chatgpt.com",
 		ChatGPTs:       []chatgpt{},
@@ -195,6 +195,7 @@ func normalizeConfig(cfg *app) {
 	for i, token := range cfg.Auth.AccessTokens {
 		cfg.Auth.AccessTokens[i] = normalizeAuthToken(token)
 	}
+	cfg.Auth.AccessTokenPrefix = nonEmptyAccessTokenPrefixes(cfg.Auth.AccessTokenPrefix)
 	pool := token_pool.GetAccessTokenPool()
 	pool.Reset()
 	for _, account := range cfg.ChatGPTs {
@@ -223,6 +224,28 @@ func maskedAuthTokens(tokens []string) []string {
 	return masked
 }
 
+func maskedAccessTokenPrefixes(prefixes []string) []string {
+	masked := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			continue
+		}
+		masked = append(masked, maskToken(prefix))
+	}
+	return masked
+}
+
+func logCurrentAuth(ctx context.Context, cfg app) {
+	logx.WithContext(ctx).Infof(
+		"current auth tokens: count=%d masked=%s, access_token_prefix: count=%d masked=%s",
+		len(cfg.Auth.AccessTokens),
+		strings.Join(maskedAuthTokens(cfg.Auth.AccessTokens), ", "),
+		len(cfg.Auth.AccessTokenPrefix),
+		strings.Join(maskedAccessTokenPrefixes(cfg.Auth.AccessTokenPrefix), ", "),
+	)
+}
+
 func maskToken(token string) string {
 	if len(token) <= 10 {
 		return "***"
@@ -237,6 +260,23 @@ func nonEmptyAuthTokens(tokens []string) []string {
 		if token != "" {
 			normalized = append(normalized, token)
 		}
+	}
+	return normalized
+}
+
+func nonEmptyAccessTokenPrefixes(prefixes []string) []string {
+	normalized := make([]string, 0, len(prefixes))
+	seen := make(map[string]struct{}, len(prefixes))
+	for _, prefix := range prefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			continue
+		}
+		if _, ok := seen[prefix]; ok {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		normalized = append(normalized, prefix)
 	}
 	return normalized
 }
@@ -354,7 +394,7 @@ func Init(ctx context.Context) func(context.Context) {
 			return err
 		}
 		setApp(next)
-		logx.WithContext(ctx).Infof("current auth tokens: count=%d masked=%s", len(next.Auth.AccessTokens), strings.Join(maskedAuthTokens(next.Auth.AccessTokens), ", "))
+		logCurrentAuth(ctx, next)
 		return nil
 	})
 	if err != nil {
@@ -392,7 +432,7 @@ func InitServerless(ctx context.Context) func(context.Context) {
 		logx.WithContext(ctx).Fatalf("configure log failed: %+v", err)
 	}
 	setApp(next)
-	logx.WithContext(ctx).Infof("current auth tokens: count=%d masked=%s", len(next.Auth.AccessTokens), strings.Join(maskedAuthTokens(next.Auth.AccessTokens), ", "))
+	logCurrentAuth(ctx, next)
 	return func(context.Context) {
 		logx.CloseOutput()
 	}
@@ -404,6 +444,12 @@ func applyEnvOverrides(cfg *app) {
 	}
 	if value := strings.TrimSpace(os.Getenv("ACCESS_TOKENS")); value != "" {
 		cfg.Auth.AccessTokens = splitEnvList(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("ACCESS_TOKEN_PREFIX")); value != "" {
+		cfg.Auth.AccessTokenPrefix = splitEnvList(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("ACCESS_TOKEN_PREFIXES")); value != "" {
+		cfg.Auth.AccessTokenPrefix = splitEnvList(value)
 	}
 	if value := strings.TrimSpace(os.Getenv("CHATGPT_ACCESS_TOKENS")); value != "" {
 		for _, token := range splitEnvList(value) {

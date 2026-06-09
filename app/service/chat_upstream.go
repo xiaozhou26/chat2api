@@ -1,28 +1,158 @@
 package service
 
 import (
+	"bytes"
 	"chat2api/app/chatgpt_backend"
 	"chat2api/app/common"
 	"chat2api/app/types/chat"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/aurorax-neo/tls_client_httpi"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func sendChatRequest(c *gin.Context, chatReq *chat.Request) (*http.Response, string, error) {
-	body, err := common.Struct2BytesBuffer(chatReq)
-	if err != nil {
-		return nil, "", err
-	}
 	backend, err := chatgpt_backend.New(c.Request.Header.Get("Authorization"), chatgpt_backend.Retry())
 	if err != nil {
 		return nil, "", err
 	}
-	headers, cookies := backend.Headers(backend.ChatURL)
+	if err := prepareChatVisionInputs(backend, chatReq); err != nil {
+		return nil, backend.AccAuth, err
+	}
+	applyChatTargetDefaults(backend, chatReq)
+	upstreamURL := backend.ChatURL
+	if shouldUseFConversation(backend) {
+		upstreamURL = backend.BaseURL + "/backend-api/f/conversation"
+		applyFConversationPayloadDefaults(chatReq)
+	}
+	conduitToken, err := prepareFConversation(backend, upstreamURL, chatReq)
+	if err != nil {
+		return nil, backend.AccAuth, err
+	}
+	body, err := common.Struct2BytesBuffer(chatReq)
+	if err != nil {
+		return nil, backend.AccAuth, err
+	}
+	headers, cookies := backend.Headers(upstreamURL)
 	headers.Set("accept", "text/event-stream")
 	headers.Set("content-type", "application/json")
+	applySentinelHeaders(headers, backend, true)
+	if conduitToken != "" {
+		headers.Set("x-conduit-token", conduitToken)
+	}
+	response, err := backend.HTTP.Request(tls_client_httpi.POST, upstreamURL, headers, cookies, body)
+	if err != nil {
+		return nil, backend.AccAuth, fmt.Errorf("upstream request failed: %w", err)
+	}
+	return response, backend.AccAuth, nil
+}
+
+func applyChatTargetDefaults(backend *chatgpt_backend.Client, chatReq *chat.Request) {
+	timezone, offset := backend.ChatTimezone()
+	chatReq.Timezone = timezone
+	chatReq.TimeZoneOffsetMin = offset
+}
+
+func shouldUseFConversation(backend *chatgpt_backend.Client) bool {
+	return backend.AccAuth != ""
+}
+
+func messageHasAssetPointer(message chat.Message) bool {
+	if message.Content.ContentType != "multimodal_text" {
+		return false
+	}
+	for _, part := range message.Content.Parts {
+		item, ok := part.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(responseStringValue(item["content_type"], "")) == "image_asset_pointer" {
+			return true
+		}
+		if pointer := strings.TrimSpace(responseStringValue(item["asset_pointer"], "")); strings.HasPrefix(pointer, "file-service://") || strings.HasPrefix(pointer, "sediment://") {
+			return true
+		}
+	}
+	return false
+}
+
+func applyFConversationPayloadDefaults(chatReq *chat.Request) {
+	chatReq.ClientPrepareState = "sent"
+	chatReq.EnableMessageFollowups = true
+	chatReq.SupportsBuffering = true
+	chatReq.SupportedEncodings = []string{"v1"}
+	chatReq.HistoryAndTrainingDisabled = false
+	chatReq.ParagenCotSummaryDisplayOverride = "allow"
+	chatReq.ForceParallelSwitch = "auto"
+	chatReq.ThinkingEffort = "standard"
+	chatReq.ClientContextualInfo = chat.ClientContextualInfo{
+		IsDarkMode:      false,
+		TimeSinceLoaded: 1200,
+		PageHeight:      1072,
+		PageWidth:       1724,
+		PixelRatio:      1.2,
+		ScreenHeight:    1440,
+		ScreenWidth:     2560,
+		AppName:         "chatgpt.com",
+	}
+}
+
+func prepareFConversation(backend *chatgpt_backend.Client, upstreamURL string, chatReq *chat.Request) (string, error) {
+	if backend.AccAuth == "" || !strings.HasSuffix(upstreamURL, "/backend-api/f/conversation") {
+		return "", nil
+	}
+	path := "/backend-api/f/conversation/prepare"
+	payload := map[string]interface{}{
+		"action":                 "next",
+		"fork_from_shared_post":  false,
+		"parent_message_id":      chatReq.ParentMessageId,
+		"model":                  chatReq.Model,
+		"client_prepare_state":   "success",
+		"timezone_offset_min":    chatReq.TimeZoneOffsetMin,
+		"timezone":               chatReq.Timezone,
+		"conversation_mode":      chatReq.ConversationMode,
+		"system_hints":           chatReq.SystemHints,
+		"partial_query":          partialQueryFromChatRequest(chatReq),
+		"supports_buffering":     true,
+		"supported_encodings":    []string{"v1"},
+		"client_contextual_info": map[string]interface{}{"app_name": "chatgpt.com"},
+		"thinking_effort":        "standard",
+	}
+	if mimeTypes := attachmentMimeTypes(chatReq); len(mimeTypes) > 0 {
+		payload["attachment_mime_types"] = mimeTypes
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	headers, cookies := backend.Headers(backend.BaseURL + path)
+	headers.Set("accept", "application/json")
+	headers.Set("content-type", "application/json")
+	applySentinelHeaders(headers, backend, false)
+	resp, err := backend.HTTP.Request(tls_client_httpi.POST, backend.BaseURL+path, headers, cookies, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("prepare f conversation failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if !isHTTPSuccess(resp.StatusCode) {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("prepare f conversation failed: status=%d body=%s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		ConduitToken string `json:"conduit_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(result.ConduitToken), nil
+}
+
+func applySentinelHeaders(headers tls_client_httpi.Headers, backend *chatgpt_backend.Client, includeTurnTrace bool) {
 	headers.Set("openai-sentinel-chat-requirements-token", backend.Auth.Token)
 	if backend.Auth.ProofWork.Ospt != "" {
 		headers.Set("openai-sentinel-proof-token", backend.Auth.ProofWork.Ospt)
@@ -33,9 +163,47 @@ func sendChatRequest(c *gin.Context, chatReq *chat.Request) (*http.Response, str
 	if backend.Auth.SoToken != "" {
 		headers.Set("openai-sentinel-so-token", backend.Auth.SoToken)
 	}
-	response, err := backend.HTTP.Request(tls_client_httpi.POST, backend.ChatURL, headers, cookies, body)
-	if err != nil {
-		return nil, backend.AccAuth, fmt.Errorf("upstream request failed: %w", err)
+	if includeTurnTrace {
+		headers.Set("x-oai-turn-trace-id", uuid.New().String())
 	}
-	return response, backend.AccAuth, nil
+}
+
+func partialQueryFromChatRequest(chatReq *chat.Request) map[string]interface{} {
+	message := latestUserMessage(chatReq.Messages)
+	return map[string]interface{}{
+		"id":      uuid.New().String(),
+		"author":  map[string]interface{}{"role": "user"},
+		"content": message.Content,
+	}
+}
+
+func latestUserMessage(messages []chat.Message) chat.Message {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if strings.TrimSpace(messages[i].Author.Role) == "user" {
+			return messages[i]
+		}
+	}
+	if len(messages) > 0 {
+		return messages[len(messages)-1]
+	}
+	return chat.Message{Content: chat.Content{ContentType: "text", Parts: []interface{}{""}}}
+}
+
+func attachmentMimeTypes(chatReq *chat.Request) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0)
+	for _, message := range chatReq.Messages {
+		attachments, ok := message.Metadata["attachments"].([]chat.Attachment)
+		if !ok {
+			continue
+		}
+		for _, item := range attachments {
+			mimeType := strings.TrimSpace(item.MimeType)
+			if mimeType != "" && !seen[mimeType] {
+				seen[mimeType] = true
+				result = append(result, mimeType)
+			}
+		}
+	}
+	return result
 }

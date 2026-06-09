@@ -18,7 +18,7 @@ func ConvertToString(id string, model string, chatResp *chat.Response, previousT
 	apiRespJson.MessageId = chatResp.Message.Id
 	if role {
 		apiRespJson.Choices[0].Delta.Role = chatResp.Message.Author.Role
-	} else if apiRespJson.Choices[0].Delta.Content == "" {
+	} else if apiRespJson.Choices[0].Delta.Content == nil || *apiRespJson.Choices[0].Delta.Content == "" {
 		return ""
 	}
 	previousText.Text = text
